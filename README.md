@@ -1,0 +1,2 @@
+# squid-cache
+Subsquid Cache
