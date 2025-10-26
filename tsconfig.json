@@ -9,6 +9,8 @@
     "rootDir": "src",
     "strict": true,
     "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true
