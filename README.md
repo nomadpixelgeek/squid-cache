@@ -1,2 +1,9 @@
-# Squid Cache
-Squid Cache is a package that stores subsquid caches in a hierarchical manner, allowing for efficient retrieval and management of cached content.
+# @nomadpixelgeek/squid-cache
+
+Shared local filestore cache + unified replay CLI for Subsquid projects.
+
+## Install
+
+```bash
+npm i @nomadpixelgeek/squid-cache
+```
