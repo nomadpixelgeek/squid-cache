@@ -1,6 +1,6 @@
 {
   "name": "@nomadpixelgeek/squid-cache",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Shared local filestore cache + unified replay CLI for Subsquid-based projects.",
   "private": false,
   "type": "module",
