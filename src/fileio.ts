@@ -49,21 +49,57 @@ export async function* gunzipReadNDJSON<T>(fileAbsPath: string, skipHeader = fal
   if (rows.length) yield rows
 }
 
-// Manifest helpers (atomic-ish update)
+// ---------- Manifest + Locking ----------
+
 type Manifest = { files: { path: string; minBlock: number; maxBlock: number }[] }
 
-export function withManifest(manifestPath: string, mutate?: (m: Manifest) => Manifest): any {
-  let m: Manifest
-  try { m = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) } catch { m = { files: [] } }
-  if (!mutate) {
-    return m.files.map(f => ({
-      absPath: path.join(path.dirname(manifestPath), f.path),
-      minBlock: f.minBlock, maxBlock: f.maxBlock
-    }))
+function lockPath(manifestPath: string) {
+  return `${manifestPath}.lock`
+}
+
+function acquireLock(manifestPath: string, timeoutMs = Number(process.env.SQUID_CACHE_LOCK_TIMEOUT_MS ?? 5000)) {
+  const lp = lockPath(manifestPath)
+  const start = Date.now()
+  // Attempt exclusive create with 'wx'
+  while (true) {
+    try {
+      const fd = fs.openSync(lp, 'wx')
+      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }))
+      fs.closeSync(fd)
+      return
+    } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e
+      if (Date.now() - start > timeoutMs) throw new Error(`Timeout acquiring manifest lock: ${lp}`)
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50) // tiny sleep
+    }
   }
-  const next = mutate(m)
-  const tmp = `${manifestPath}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
-  fs.renameSync(tmp, manifestPath)
-  return next
+}
+
+function releaseLock(manifestPath: string) {
+  try { fs.unlinkSync(lockPath(manifestPath)) } catch {}
+}
+
+export function withManifest(manifestPath: string, mutate?: (m: Manifest) => Manifest): any {
+  // Always lock around manifest access for multi-writer safety
+  ensureDir(path.dirname(manifestPath))
+  acquireLock(manifestPath)
+  try {
+    let m: Manifest
+    try { m = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) } catch { m = { files: [] } }
+
+    if (!mutate) {
+      return m.files.map(f => ({
+        absPath: path.join(path.dirname(manifestPath), f.path),
+        minBlock: f.minBlock, maxBlock: f.maxBlock
+      }))
+    }
+
+    const next = mutate(m)
+    const tmp = `${manifestPath}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
+    fs.renameSync(tmp, manifestPath)
+    return next
+  } finally {
+    releaseLock(manifestPath)
+  }
 }
