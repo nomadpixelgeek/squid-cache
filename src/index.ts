@@ -1,7 +1,7 @@
 // src/index.ts
-import { gzipWriteNDJSON, gunzipReadNDJSON, ensureDir, withManifest, ReplayFile } from './fileio.ts'
-import { stableHash16 } from './hashing.ts'
-import { makeLogger, Logger } from './logger.ts'
+import { gzipWriteNDJSON, gunzipReadNDJSON, ensureDir, withManifest, ReplayFile } from './fileio'
+import { stableHash16 } from './hashing'
+import { makeLogger, Logger } from './logger'
 import * as path from 'path'
 
 export { makeLogger }

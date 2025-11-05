@@ -5,7 +5,7 @@ import 'dotenv/config'
 import * as fs from 'fs'
 import * as path from 'path'
 import { pathToFileURL } from 'url'
-import { makeRecorder, SlimBlock } from './index.ts'
+import { makeRecorder, SlimBlock } from './index'
 
 type Target = {
   project: string
