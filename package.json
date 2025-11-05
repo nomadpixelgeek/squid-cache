@@ -1,6 +1,6 @@
 {
   "name": "@nomadpixelgeek/squid-cache",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Shared local filestore cache + unified replay CLI for Subsquid-based projects.",
   "private": false,
   "type": "module",
@@ -13,6 +13,10 @@
     },
     "./cli": {
       "import": "./dist/cli.js"
+    },
+    "./clean": {
+      "import": "./dist/clean.js",
+      "types": "./dist/clean.d.ts"
     }
   },
   "bin": {
