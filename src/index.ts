@@ -4,10 +4,24 @@ import { stableHash16 } from './hashing'
 import { makeLogger, Logger } from './logger'
 import * as path from 'path'
 
-export { makeLogger }
-export type SlimLog = { address: string; data: string; topics: string[]; transactionHash: string; blockNumber: number; logIndex: number; transactionIndex: number }
+export { makeLogger } from './logger'
+
+export type SlimLog = {
+  address: string
+  data: string
+  topics: string[]
+  transactionHash: string
+  blockNumber: number
+  logIndex: number
+  transactionIndex: number
+}
 export type SlimTx = { hash?: string; from?: string; to?: string }
-export type SlimBlock = { header: { height: number; hash?: string | null; timestamp: number }; logs: SlimLog[]; transactions?: SlimTx[] }
+
+export type SlimBlock = {
+  header: { height: number; hash?: string | null; timestamp: number }
+  logs: SlimLog[]
+  transactions?: SlimTx[]
+}
 
 export type CacheMode = 'record' | 'replay' | 'off'
 
@@ -29,14 +43,43 @@ export type Recorder = {
   recordBatch(blocks: any[]): Promise<void>
   listReplayFiles(): ReplayFile[]
   readFile(fileAbsPath: string): AsyncGenerator<SlimBlock[]>
+  autoSwapBlocks(liveBlocks: SlimBlock[], logger?: Pick<Logger, 'info' | 'debug'>): Promise<SlimBlock[]>
 }
 
 function envMode(): CacheMode {
   const m = (process.env.SQUID_CACHE_MODE || 'record').toLowerCase()
-  return (['record','replay','off'].includes(m) ? m : 'record') as CacheMode
+  return (['record', 'replay', 'off'].includes(m) ? m : 'record') as CacheMode
 }
 function envRoot(defaultRoot: string) {
   return process.env.SQUID_CACHE_ROOT || defaultRoot
+}
+function envAutoUse(): boolean {
+  const v = String(process.env.SQUID_CACHE_AUTO_USE || 'off').toLowerCase()
+  return v === '1' || v === 'true' || v === 'on' || v === 'yes'
+}
+function envRequireFullCover(): boolean {
+  const v = String(process.env.SQUID_CACHE_AUTO_REQUIRE_FULL_COVER || 'true').toLowerCase()
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no')
+}
+
+// helpers
+function minMaxFrom(blocks: SlimBlock[]) {
+  if (!blocks.length) return { min: 0, max: -1 }
+  const hs = blocks.map(b => b.header.height)
+  return { min: Math.min(...hs), max: Math.max(...hs) }
+}
+function intersects(aMin: number, aMax: number, bMin: number, bMax: number) {
+  return !(aMax < bMin || bMax < aMin)
+}
+function fullyCovered(aMin: number, aMax: number, segs: { min: number; max: number }[]) {
+  let cursor = aMin
+  const sorted = segs.filter(s => s.max >= aMin && s.min <= aMax).sort((x, y) => x.min - y.min)
+  for (const s of sorted) {
+    if (s.min > cursor) return false
+    cursor = Math.max(cursor, s.max + 1)
+    if (cursor > aMax) return true
+  }
+  return cursor > aMax
 }
 
 export function makeRecorder(init: CacheInit): Recorder {
@@ -45,12 +88,10 @@ export function makeRecorder(init: CacheInit): Recorder {
   const project = init.project
   const chain = init.chain
   const configHash = stableHash16({ project, chain, identity: init.configIdentity })
-
   const base = path.join(root, project, chain, configHash)
-  const log = (init.logger ?? makeLogger('squid-cache'))
-    .child({ prefix: `${project}/${chain}@${configHash}` })
+  const log = (init.logger ?? makeLogger('squid-cache')).child({ prefix: `${project}/${chain}@${configHash}` })
 
-  // Startup banner
+  // Banner
   log.info(`cache root: ${base}`)
   if (mode === 'record') log.info(`mode=record → batches will be written`)
   if (mode === 'replay') log.info(`mode=replay → batches will be read; no writes`)
@@ -66,8 +107,12 @@ export function makeRecorder(init: CacheInit): Recorder {
       return
     }
 
-    const slim: SlimBlock[] = blocks.map((b) => ({
-      header: { height: b.header?.height ?? b.header?.number ?? b.number ?? 0, hash: b.header?.hash ?? null, timestamp: b.header?.timestamp ?? 0 },
+    const slim: SlimBlock[] = blocks.map((b: any) => ({
+      header: {
+        height: b.header?.height ?? b.header?.number ?? b.number ?? 0,
+        hash: b.header?.hash ?? null,
+        timestamp: b.header?.timestamp ?? 0,
+      },
       logs: (b.logs ?? []).map((l: any) => ({
         address: l.address, data: l.data, topics: l.topics, transactionHash: l.transactionHash,
         blockNumber: l.blockNumber ?? b.header?.height ?? 0, logIndex: l.logIndex ?? 0, transactionIndex: l.transactionIndex ?? 0,
@@ -95,7 +140,8 @@ export function makeRecorder(init: CacheInit): Recorder {
       return man
     })
 
-    log.info(`cached batch ${minBlock}-${maxBlock} (${slim.reduce((n, b) => n + (b.logs?.length || 0), 0)} logs)`)
+    const totalLogs = slim.reduce((n, b) => n + (b.logs?.length || 0), 0)
+    log.info(`cached batch ${minBlock}-${maxBlock} (${totalLogs} logs)`)
   }
 
   function listReplayFiles(): ReplayFile[] {
@@ -114,5 +160,57 @@ export function makeRecorder(init: CacheInit): Recorder {
     log.debug(`finished file: ${fileName}`)
   }
 
-  return { root, project, chain, configHash, mode, recordBatch, listReplayFiles, readFile }
+  async function autoSwapBlocks(liveBlocks: SlimBlock[], logger?: Pick<Logger, 'info' | 'debug'>): Promise<SlimBlock[]> {
+    const autoOn = envAutoUse()
+    if (!autoOn || !liveBlocks?.length) return liveBlocks
+
+    const { min, max } = minMaxFrom(liveBlocks)
+    const files = listReplayFiles()
+    if (!files.length) return liveBlocks
+
+    const inRange = files.filter(f => intersects(min, max, f.minBlock, f.maxBlock))
+    if (!inRange.length) return liveBlocks
+
+    const requireFull = envRequireFullCover()
+    if (requireFull) {
+      const covers = fullyCovered(min, max, inRange.map(f => ({ min: f.minBlock, max: f.maxBlock })))
+      if (!covers) {
+        logger?.debug?.(`[cache:auto] coverage not full for ${chain} ${min}-${max}, live path stays`)
+        return liveBlocks
+      }
+    }
+
+    const collected: SlimBlock[] = []
+    for (const f of inRange) {
+      for await (const blocks of readFile(f.absPath)) {
+        for (const b of blocks) {
+          const h = b.header.height
+          if (h >= min && h <= max) collected.push(b)
+        }
+      }
+    }
+
+    // sort + dedup by height
+    collected.sort((a, b) => a.header.height - b.header.height)
+    const dedup: SlimBlock[] = []
+    let last = -1
+    for (const b of collected) {
+      if (b.header.height !== last) { dedup.push(b); last = b.header.height }
+    }
+
+    if (requireFull) {
+      const gotFirst = dedup[0]?.header.height
+      const gotLast = dedup[dedup.length - 1]?.header.height
+      if (!(gotFirst === min && gotLast === max && dedup.length >= (max - min + 1))) {
+        logger?.debug?.(`[cache:auto] stitched blocks didn’t fully cover ${min}-${max}, live path stays`)
+        return liveBlocks
+      }
+    }
+
+    const info = logger ?? log
+    info.info(`[cache:auto] using cached input for ${project}/${chain} covering ${min}-${max} from ${inRange.length} file(s)`)
+    return dedup
+  }
+
+  return { root, project, chain, configHash, mode, recordBatch, listReplayFiles, readFile, autoSwapBlocks }
 }

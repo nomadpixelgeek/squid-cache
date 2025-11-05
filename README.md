@@ -1,149 +1,139 @@
-# 🧰 `@nomadpixelgeek/squid-cache`
+# `@nomadpixelgeek/squid-cache`
 
-**Unified caching and replay system for Subsquid-based projects**
-*(Supports: multi-project, multi-chain, concurrent writers, replay filtering, retention management.)*
+**Unified caching + automatic replay for Subsquid projects**
 
----
+* Record raw input (blocks/logs/txs) in **gzipped NDJSON**.
+* **Auto-use** cached inputs on normal runs when coverage is available (no manual replay step needed).
+* Unified replay CLI for multi-project rebuilds (with `--fromBlock/--toBlock`).
+* Cleaner CLI for retention (by days or total size).
+* Multi-writer safe manifest updates (lightweight lock).
 
-## 📖 Overview
 
-`@nomadpixelgeek/squid-cache` lets you:
-
-* **Record** every block/log batch processed by your Subsquid indexers.
-* **Cache** them locally (or on shared storage).
-* **Replay** them later to rebuild or test database schemas — *without fetching from RPC*.
-* **Clean** old or oversized caches automatically.
-* **Safely share** caches across multiple concurrent writers with a built-in lock.
-
----
-
-## 🧱 Folder Layout
-
-Cache files are organized by:
-
-```
-<SQUID_CACHE_ROOT>/<project>/<chain>/<configHash>/<YYYY-MM-DD>/<from>-<to>.ndjson.gz
-```
-
-Each namespace (combination of project/chain/config) has its own:
-
-```
-manifest.json         # index of cached batches
-manifest.json.lock    # safe write lock for multi-writer setups
-```
-
----
-
-## ⚙️ Environment Variables
-
-| Variable                      | Default         | Description                                                |
-| ----------------------------- | --------------- | ---------------------------------------------------------- |
-| `SQUID_CACHE_ROOT`            | `./squid-cache` | Root directory for all cache data                          |
-| `SQUID_CACHE_MODE`            | `record`        | `record`, `replay`, or `off`                               |
-| `SQUID_CACHE_LOG_LEVEL`       | `info`          | Log verbosity (`silent`, `error`, `warn`, `info`, `debug`) |
-| `SQUID_CACHE_LOCK_TIMEOUT_MS` | `5000`          | Timeout for manifest lock acquisition (ms)                 |
-
----
-
-## 🚀 Installation
+## Install
 
 ```bash
-npm install @nomadpixelgeek/squid-cache
-```
-
-or
-
-```bash
+npm i @nomadpixelgeek/squid-cache
+# or
 yarn add @nomadpixelgeek/squid-cache
 ```
 
 ---
 
-## 🪄 Recording Flow (Live Mode)
+## Environment Variables
 
-Use this in **live processors** to capture all EVM batches.
+| Variable                              | Default         | Purpose                                                      |
+| ------------------------------------- | --------------- | ------------------------------------------------------------ |
+| `SQUID_CACHE_ROOT`                    | `./squid-cache` | Root directory for caches                                    |
+| `SQUID_CACHE_MODE`                    | `record`        | `record` | `replay` | `off`                                  |
+| `SQUID_CACHE_LOG_LEVEL`               | `info`          | `silent` | `error` | `warn` | `info` | `debug`               |
+| `SQUID_CACHE_AUTO_USE`                | `off`           | `on` → try to auto-swap this batch with cached data          |
+| `SQUID_CACHE_AUTO_REQUIRE_FULL_COVER` | `true`          | Require the entire `[min..max]` to be cached before swapping |
+| `SQUID_CACHE_LOCK_TIMEOUT_MS`         | `5000`          | Lock wait time for manifest updates                          |
+
+---
+
+## What’s New (Auto-Use Cache)
+
+On each batch, the package can **automatically replace** the live `ctx.blocks` with cached blocks when it detects full coverage:
 
 ```ts
-import { makeRecorder } from '@nomadpixelgeek/squid-cache'
-
-// Create the recorder once per chain
-const recorder = makeRecorder({
-  project: 'events',             // your project name
-  chain: 'arbitrum',             // network name
-  configIdentity: {              // what defines your current dataset
-    finality: 0,
-    contracts: cfg.contractConfigs.map(c => ({
-      address: c.address.toLowerCase(),
-      from: c.from ?? 0,
-      to: c.to ?? null,
-      abiVer: `${c.abi}_${c.version}`,
-    })),
-  },
-})
-
-// inside proc.run(...)
-await recorder.recordBatch(ctx.blocks)
+const cached = await recorder.autoSwapBlocks(ctx.blocks, log)
+// If cached coverage is available, `cached` contains the blocks from cache.
+// Otherwise, `cached === ctx.blocks`.
+(ctx as any).blocks = cached
 ```
 
-### Run in record mode
+Enable it with:
 
 ```bash
-export SQUID_CACHE_MODE=record
-export SQUID_CACHE_ROOT=/var/lib/squid-cache
-export SQUID_CACHE_LOG_LEVEL=info
-
-yarn start
+export SQUID_CACHE_AUTO_USE=on
+export SQUID_CACHE_AUTO_REQUIRE_FULL_COVER=true   # recommended
 ```
 
-**Logs you’ll see:**
+> Tip: In environments where you *only* want to read cache (no writes), set `SQUID_CACHE_MODE=replay`.
+
+---
+
+## Folder Layout
 
 ```
-cache root: /var/lib/squid-cache/events/arbitrum/abcd1234
-mode=record → batches will be written
-cached batch 19000000-19000015 (42 logs)
+<SQUID_CACHE_ROOT>/<project>/<chain>/<configHash>/
+  manifest.json
+  manifest.json.lock    # multi-writer safe
+  <YYYY-MM-DD>/
+    <from>-<to>.ndjson.gz
 ```
 
 ---
 
-## 🔁 Replay Flow (Offline Mode)
+## Quick Start (Recording + Auto-Use)
 
-Replay previously cached input batches to rebuild the DB (no RPC needed).
-
-### 1. Project-level replay script
-
-Each project (e.g., `events`, `analytics`) defines:
+In your processor (e.g., `src/main.ts`):
 
 ```ts
-import { makeRecorder } from '@nomadpixelgeek/squid-cache'
-import { replayBatch } from './replayRunner'
+import { makeRecorder, makeLogger } from '@nomadpixelgeek/squid-cache'
 
-const rec = makeRecorder({
-  project: 'events',
-  chain: 'arbitrum',
-  configIdentity: { finality: 0, contracts: [/* ... */] },
-  mode: 'replay',
-})
+const logger = makeLogger('cache')
 
-const files = rec.listReplayFiles()
-for (const f of files) {
-  for await (const blocks of rec.readFile(f.absPath)) {
-    await replayBatch('events', 'arbitrum', blocks)
-  }
+// Build this from your chain config (must match for replay/auto-swap)
+const configIdentity = {
+  finality: cfg.finality ?? 0,
+  contracts: cfg.contractConfigs.map(c => ({
+    address: c.address.toLowerCase(),
+    from: c.from ?? 0,
+    to: c.to ?? null,
+    abiVer: `${c.abi}_${c.version}`,
+  })),
 }
+
+const recorder = makeRecorder({
+  project: 'events',
+  chain: chainName,
+  configIdentity,
+  logger: logger.child({ prefix: `events/${chainName}` }),
+})
+
+proc.run(database, async (ctx) => {
+  // 1) Auto-swap blocks from cache if coverage is available
+  //    (requires SQUID_CACHE_AUTO_USE=on)
+  ;(ctx as any).blocks = await recorder.autoSwapBlocks(ctx.blocks, logger)
+
+  // 2) Optionally record this batch (skipped automatically in SQUID_CACHE_MODE=replay)
+  await recorder.recordBatch(ctx.blocks)
+
+  // 3) Your normal extraction + DB writes
+  await extractAndPersist(ctx)
+})
 ```
 
-Run it:
+Recommended env in prod (recording + auto-use **off** by default):
 
 ```bash
-export SQUID_CACHE_MODE=replay
-node dist/replay.js
+export SQUID_CACHE_ROOT=/var/lib/squid-cache
+export SQUID_CACHE_MODE=record
+export SQUID_CACHE_LOG_LEVEL=info
+# Turn on auto-use only where you want it:
+# export SQUID_CACHE_AUTO_USE=on
+# export SQUID_CACHE_AUTO_REQUIRE_FULL_COVER=true
 ```
 
 ---
 
-## 🧩 Unified Replay CLI (Multi-project orchestration)
+## Unified Replay CLI (Optional)
 
-### 1️⃣ Create `replay.targets.json`
+You can still rebuild DBs offline without RPC using the unified CLI:
+
+```bash
+squid-cache-replay \
+  --targets ./replay.targets.json \
+  --concurrency 3 \
+  --fromBlock 19000000 \
+  --toBlock 19100000 \
+  --projects events,analytics \
+  --chains arbitrum,base
+```
+
+`replay.targets.json`:
 
 ```json
 [
@@ -157,212 +147,100 @@ node dist/replay.js
         { "address": "0xabc...", "from": 123, "to": null, "abiVer": "symmio_0_8_4" }
       ]
     }
-  },
-  {
-    "project": "analytics",
-    "chain": "base",
-    "runner": "../analytics/dist/replayRunner.js",
-    "configIdentity": {
-      "finality": 0,
-      "contracts": [
-        { "address": "0xdef...", "from": 456, "to": null, "abiVer": "symmio_0_8_3" }
-      ]
-    }
   }
 ]
 ```
 
-### 2️⃣ Run CLI
-
-```bash
-export SQUID_CACHE_ROOT=/var/lib/squid-cache
-export SQUID_CACHE_MODE=replay
-
-# Replay all
-squid-cache-replay --targets ./replay.targets.json
-
-# Replay with concurrency
-squid-cache-replay --targets ./replay.targets.json --concurrency 3
-
-# Replay filtered by project/chain
-squid-cache-replay --targets ./replay.targets.json --projects events --chains arbitrum
-
-# Replay a block range
-squid-cache-replay --targets ./replay.targets.json --fromBlock 19000000 --toBlock 19100000
-
-# Dry run
-squid-cache-replay --targets ./replay.targets.json --dry-run
-```
-
 ---
 
-## 🧼 Cache Cleaning CLI
+## Cache Cleaner CLI
 
-`@nomadpixelgeek/squid-cache` includes a built-in cleaner to manage cache size and age.
-
-### 🧽 Delete caches older than N days
+Keep caches tidy:
 
 ```bash
+# delete date folders older than 14 days
 squid-cache-clean --days 14
-```
 
-### 🧹 Keep total under a size limit
+# keep total under 500 GB
+squid-cache-clean --max-bytes 536870912000
 
-```bash
-squid-cache-clean --max-bytes 536870912000   # 500 GB
-```
+# scope to projects/chains
+squid-cache-clean --days 21 --projects events,analytics --chains arbitrum,base
 
-### 🕹️ Filter by project/chain
-
-```bash
-squid-cache-clean --days 14 --projects events,analytics --chains arbitrum,base
-```
-
-### 🧪 Dry-run mode
-
-```bash
+# dry run
 squid-cache-clean --max-bytes 214748364800 --dry-run
 ```
 
-### CLI Summary
+---
 
-| Flag                      | Description                           |
-| ------------------------- | ------------------------------------- |
-| `--root <dir>`            | Override cache root                   |
-| `--days <n>`              | Delete date folders older than N days |
-| `--max-bytes <n>`         | Keep total size under N bytes         |
-| `--projects` / `--chains` | Filter by project/chain               |
-| `--dry-run`               | Show actions but don’t delete         |
+## API Reference
+
+### `makeRecorder(options) → Recorder`
+
+**Options:**
+
+* `project: string`
+* `chain: string`
+* `configIdentity: unknown` — object describing what you index (finality, contracts, abiVer…)
+* `mode?: 'record' | 'replay' | 'off'` (default picks from `SQUID_CACHE_MODE`)
+* `logger?: Logger` (optional)
+
+**Recorder methods:**
+
+* `recordBatch(blocks: any[]): Promise<void>`
+  Writes a gzipped NDJSON with a small header, updates `manifest.json`.
+  Skips automatically if `mode='replay'` or `mode='off'`.
+* `listReplayFiles(): ReplayFile[]`
+  Lists `{ absPath, minBlock, maxBlock }` from the manifest.
+* `readFile(absPath: string): AsyncGenerator<SlimBlock[]>`
+  Streams cached blocks from one file (skips header line).
+* `autoSwapBlocks(liveBlocks: SlimBlock[], logger?): Promise<SlimBlock[]>`
+  If `SQUID_CACHE_AUTO_USE=on` and **full coverage** (by default) exists for `[min..max]` of `liveBlocks`, returns **cached blocks** stitched and deduped. Otherwise returns `liveBlocks` unchanged.
+
+**Types:**
+
+* `SlimBlock` — minimal block shape the package stores/returns.
+* `SlimLog`, `SlimTx` — minimal shapes for logs/txs.
 
 ---
 
-## 🔐 Manifest Locking
+## Multi-Writer Safety
 
-To prevent corruption when **multiple processors write to the same namespace**,
-`manifest.json` updates are now serialized via `manifest.json.lock`.
-
-### Behavior
-
-* Each write operation tries to create `manifest.json.lock` exclusively.
-* If it exists, another writer waits (default timeout = 5s).
-* The lock is automatically deleted after each update.
+Manifest updates are wrapped by an **advisory lock** (`manifest.json.lock`) with a configurable timeout:
 
 ```bash
-export SQUID_CACHE_LOCK_TIMEOUT_MS=10000  # optional, 10 seconds
+export SQUID_CACHE_LOCK_TIMEOUT_MS=10000  # 10 seconds
 ```
 
-### What it looks like
-
-```
-manifest.json
-manifest.json.lock   # temporary while one writer updates
-```
-
-If timeout is reached:
-
-```
-Timeout acquiring manifest lock: /cache/events/arbitrum/abcd1234/manifest.json.lock
-```
+If the lock can’t be acquired in time, an error is thrown (fail fast, avoid corruption).
 
 ---
 
-## 🧠 Recommended Workflow
+## Logging
 
-| Situation                       | What to do                                                                  |
-| ------------------------------- | --------------------------------------------------------------------------- |
-| **Normal live indexing**        | Set `SQUID_CACHE_MODE=record`. All batches will be cached while processing. |
-| **Schema migration or rebuild** | Set `SQUID_CACHE_MODE=replay` and run replay (project or unified CLI).      |
-| **Multiple chains/projects**    | Add all to `replay.targets.json` and run unified CLI with concurrency.      |
-| **Cache too large**             | Run `squid-cache-clean --days N` or `--max-bytes`.                          |
-| **Sharded processors**          | Locking ensures safe manifest updates automatically.                        |
-
----
-
-## 🧾 Typical Directory Example
-
-```
-/var/lib/squid-cache/
-├── events/
-│   └── arbitrum/
-│       └── 4a1cdefd1290abcd/
-│           ├── manifest.json
-│           ├── manifest.json.lock
-│           ├── 2025-10-31/
-│           │   ├── 19000000-19000015.ndjson.gz
-│           │   ├── 19000016-19000030.ndjson.gz
-│           └── 2025-11-01/
-│               └── 19000031-19000045.ndjson.gz
-├── analytics/
-│   └── base/
-│       └── 09ab1234def98765/
-│           ├── manifest.json
-│           └── 2025-10-31/
-│               ├── 12000000-12000020.ndjson.gz
-│               └── ...
-```
-
----
-
-## 🪵 Logging Examples
-
-### `SQUID_CACHE_LOG_LEVEL=info`
-
-```
-[squid-cache] [events/arbitrum@4a1cdefd1290abcd] mode=record → batches will be written
-[squid-cache] [events/arbitrum@4a1cdefd1290abcd] cached batch 19000000-19000015 (42 logs)
-[squid-cache] [events/arbitrum@4a1cdefd1290abcd] replay index: 128 file(s) available
-```
-
-### `SQUID_CACHE_LOG_LEVEL=debug`
-
-```
-[squid-cache] [events/arbitrum@4a1cdefd1290abcd] writing batch 19000000-19000015 → .../2025-11-01/19000000-19000015.ndjson.gz
-[squid-cache] [events/arbitrum@4a1cdefd1290abcd] loaded 16 blocks from 19000000-19000015.ndjson.gz
-```
-
----
-
-## 🧩 Package Summary
-
-| Component                 | Description                                               | Binary / Entry                |
-| ------------------------- | --------------------------------------------------------- | ----------------------------- |
-| `makeRecorder()`          | Creates cache recorder for recording or replaying batches | via `import { makeRecorder }` |
-| `squid-cache-replay`      | Unified replay CLI for multiple projects/chains           | `./dist/cli.js`               |
-| `squid-cache-clean`       | Cache retention & cleaning CLI                            | `./dist/clean.js`             |
-| `manifest lock`           | Automatic cross-process safety                            | Built-in                      |
-| `--fromBlock / --toBlock` | Replay subset of cached data                              | Added to CLI                  |
-| `SQUID_CACHE_LOG_LEVEL`   | Global verbosity control                                  | Built-in                      |
-
----
-
-## 🏁 Example End-to-End Workflow
-
-1️⃣ **Record**
+Set verbosity globally:
 
 ```bash
-export SQUID_CACHE_MODE=record
-yarn start
+export SQUID_CACHE_LOG_LEVEL=debug
 ```
 
-2️⃣ **Schema changes** → rebuild DB offline:
+Typical messages (info/debug):
 
-```bash
-export SQUID_CACHE_MODE=replay
-squid-cache-replay --targets ./replay.targets.json
+```
+[squid-cache] [events/arbitrum@abcd…] cache root: /var/lib/squid-cache/events/arbitrum/abcd…
+[squid-cache] [events/arbitrum@abcd…] mode=record → batches will be written
+[squid-cache] [events/arbitrum@abcd…] cached batch 19000000-19000015 (42 logs)
+[squid-cache] [events/arbitrum@abcd…] using cached input for events/arbitrum covering 19000000-19000015 from 1 file(s)
 ```
 
-3️⃣ **Trim cache weekly**
+---
 
-```bash
-squid-cache-clean --days 30
-```
+## End-to-End Example Flow
 
-4️⃣ **Monitor logs**
-
-```bash
-export SQUID_CACHE_LOG_LEVEL=info
-tail -f processor.log | grep squid-cache
-```
+1. **Record live:** `SQUID_CACHE_MODE=record` while indexing.
+2. **Auto-use** (optional): turn on `SQUID_CACHE_AUTO_USE=on` to prefer cache if a batch range is fully covered.
+3. **Schema change?** Use `squid-cache-replay` (optionally with block range filters) to rebuild offline.
+4. **Retention:** run `squid-cache-clean` weekly.
 
 ---
 
@@ -371,7 +249,3 @@ tail -f processor.log | grep squid-cache
 **MIT License**
 Copyright © 2025
 Published as [`@nomadpixelgeek/squid-cache`](https://www.npmjs.com/package/@nomadpixelgeek/squid-cache)
-
----
-
-Would you like me to append a **“Quick Start Example Repo Structure”** section (showing an example monorepo layout with the `squid-cache` package + 2 projects like `events` and `analytics`)? It helps teams onboard faster.
