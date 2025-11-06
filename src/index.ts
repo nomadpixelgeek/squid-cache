@@ -208,7 +208,7 @@ export function makeRecorder(init: CacheInit): Recorder {
     }
 
     const info = logger ?? log
-    info.info(`[cache:auto] using cached input for ${project}/${chain} covering ${min}-${max} from ${inRange.length} file(s)`)
+    log.info(`[cache:auto] using cached input for ${project}/${chain} covering ${min}-${max} from ${inRange.length} file(s)`)
     return dedup
   }
 
