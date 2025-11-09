@@ -14,6 +14,7 @@ export type SlimLog = {
   blockNumber: number
   logIndex: number
   transactionIndex: number
+  blockHash?: string
 }
 export type SlimTx = { hash?: string; from?: string; to?: string }
 
@@ -107,18 +108,38 @@ export function makeRecorder(init: CacheInit): Recorder {
       return
     }
 
-    const slim: SlimBlock[] = blocks.map((b: any) => ({
-      header: {
-        height: b.header?.height ?? b.header?.number ?? b.number ?? 0,
-        hash: b.header?.hash ?? null,
-        timestamp: b.header?.timestamp ?? 0,
-      },
-      logs: (b.logs ?? []).map((l: any) => ({
-        address: l.address, data: l.data, topics: l.topics, transactionHash: l.transactionHash,
-        blockNumber: l.blockNumber ?? b.header?.height ?? 0, logIndex: l.logIndex ?? 0, transactionIndex: l.transactionIndex ?? 0,
-      })),
-      transactions: (b.transactions ?? []).map((t: any) => ({ hash: t.hash, from: t.from, to: t.to })),
-    }))
+    const slim: SlimBlock[] = blocks.map((b) => {
+      const slimLogs: SlimLog[] = (b.logs ?? []).map((l: any) => ({
+        address: l.address,
+        data: l.data,
+        topics: l.topics,
+        transactionHash: l.transactionHash,
+        blockNumber: l.blockNumber ?? b.header?.height ?? 0,
+        logIndex: l.logIndex ?? 0,
+        transactionIndex: l.transactionIndex ?? 0,
+        blockHash: l.blockHash,
+      }))
+
+      // Prefer block.header.hash; if missing, backfill from the first log
+      const headerHash =
+        b.header?.hash ??
+        slimLogs[0]?.blockHash ??
+        null
+
+      return {
+        header: {
+          height: b.header?.height ?? b.header?.number ?? b.number ?? 0,
+          hash: headerHash,
+          timestamp: b.header?.timestamp ?? 0,
+        },
+        logs: slimLogs,
+        transactions: (b.transactions ?? []).map((t: any) => ({
+          hash: t.hash,
+          from: t.from,
+          to: t.to,
+        })),
+      }
+    })
 
     const minBlock = slim[0]?.header.height ?? 0
     const maxBlock = slim[slim.length - 1]?.header.height ?? minBlock
@@ -208,7 +229,7 @@ export function makeRecorder(init: CacheInit): Recorder {
     }
 
     const info = logger ?? log
-    log.info(`[cache:auto] using cached input for ${project}/${chain} covering ${min}-${max} from ${inRange.length} file(s)`)
+    info.info(`[cache:auto] using cached input for ${project}/${chain} covering ${min}-${max} from ${inRange.length} file(s)`)
     return dedup
   }
 
