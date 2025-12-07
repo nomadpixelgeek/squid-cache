@@ -29,6 +29,12 @@ yarn add @nomadpixelgeek/squid-cache
 | `SQUID_CACHE_AUTO_USE`                | `off`           | `on` → try to auto-swap this batch with cached data          |
 | `SQUID_CACHE_AUTO_REQUIRE_FULL_COVER` | `true`          | Require the entire `[min..max]` to be cached before swapping |
 | `SQUID_CACHE_LOCK_TIMEOUT_MS`         | `5000`          | Lock wait time for manifest updates                          |
+| `SQUID_CACHE_LOCK_TIMEOUT_MS`         | `30000`        | total time we'll wait before giving up|
+| `SQUID_CACHE_LOCK_STALE_MS`           | `60000`        | consider a lock stale after 60s and remove it|
+| `SQUID_CACHE_LOCK_BASE_DELAY_MS`      | `25`          | initial wait|
+| `SQUID_CACHE_LOCK_BACKOFF_FACTOR`     | `1.5`         | exponential backoff|
+| `SQUID_CACHE_LOCK_MAX_DELAY_MS`       | `500`         | cap per-iteration wait|
+| `SQUID_CACHE_LOCK_JITTER_MS`          | `25`          | add 0..25ms random jitter|
 
 ---
 
